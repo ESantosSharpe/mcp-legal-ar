@@ -30,7 +30,7 @@ function cargarEnvFile(p) {
     try {
         if (!fs.existsSync(p)) return;
         for (const linea of fs.readFileSync(p, "utf8").split(/\r?\n/)) {
-            const m = linea.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+            const m = linea.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
             if (!m) continue; // ignora comentarios (#...) y lineas vacias
             let v = m[2];
             if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);

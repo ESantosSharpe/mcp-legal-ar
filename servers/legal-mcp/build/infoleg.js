@@ -521,6 +521,14 @@ async function fetchBoletin(params) {
             throw new Error(`El sumario del boletin en argentina.gob.ar requiere render JS y el render fallo: ${puppeteerErr.message} (URL: ${url})`);
         }
     }
+    // El buscador de boletines de argentina.gob.ar hoy es un formulario POST protegido con
+    // Cloudflare Turnstile: los parametros por URL (buscar=, numero_boletin=) ya no filtran y
+    // la pagina vuelve sin resultados. Antes esto se informaba como "0 resultados" (engañoso).
+    if (parsed.entries.length === 0 && !parsed.numeroBoletin && !parsed.fechaPublicacion) {
+        throw new Error(`No se pudo obtener el sumario: el buscador de boletines de argentina.gob.ar devolvio la pagina sin resultados ` +
+            `(hoy es un formulario POST con verificacion Cloudflare Turnstile y los parametros por URL no filtran; no implica que ese dia no haya boletin). ` +
+            `Alternativa: usar bora__obtener_sumario_del_dia (sumario del Boletin Oficial por fecha) o bora__buscar_norma_primera_seccion. URL: ${url}`);
+    }
     return {
         url,
         numeroBoletin: parsed.numeroBoletin || params.numeroBoletin || "",

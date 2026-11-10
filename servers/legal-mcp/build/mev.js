@@ -424,6 +424,22 @@ function linkSiguiente(html) {
     });
     return next;
 }
+// Diagnostico (incluirHtml=true): HTML crudo de la primera fila de un listado, para
+// ajustar el parser cuando la MEV cambia su maquetacion. Solo se usa a pedido.
+function muestraHtmlListado(html) {
+    const $ = cheerio.load(html);
+    const a = $('a[href*="procesales.asp"]').first();
+    if (!a.length) return "(sin filas de causas)";
+    const tr = a.closest("tr");
+    return ($.html(tr) + $.html(tr.next())).replace(/\s+/g, " ").slice(0, 4000);
+}
+function aFecha(s) {
+    const m = String(s || "").match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+    if (!m) return null;
+    const y = Number(m[3]);
+    return new Date(y < 100 ? 2000 + y : y, Number(m[2]) - 1, Number(m[1]));
+}
+
 async function listadoCompleto(htmlPrimera, jur, maxPaginas = 30) {
     const acumulado = parseListado(htmlPrimera);
     let html = htmlPrimera, pag = 1, next = linkSiguiente(html);
@@ -463,12 +479,12 @@ async function listarSets({ departamento, penal = false, familia = false }) {
     return { departamento, penal, familia, sets, organismos: organismos.map((o) => ({ nombre: o.nombre, valor: o.valor })) };
 }
 
-async function causasDeSet({ departamento, nidset, penal = false, familia = false, maxPaginas = 30 }) {
+async function causasDeSet({ departamento, nidset, penal = false, familia = false, maxPaginas = 30, incluirHtml = false }) {
     const jur = { depto: departamento, penal, familia };
     await entrarJurisdiccion(jur);
     const html = await getConSesion(`/resultados.asp?nidset=${encodeURIComponent(nidset)}&sFechaDesde=&sFechaHasta=&pOrden=xCa&pOrdenAD=Asc`, jur);
     const r = await listadoCompleto(html, jur, maxPaginas);
-    return { departamento, nidset, ...r };
+    return { departamento, nidset, ...r, ...(incluirHtml ? { htmlMuestra: muestraHtmlListado(html) } : {}) };
 }
 
 async function novedadesDeSet({ departamento, nidset, desde, hasta, penal = false, familia = false, maxPaginas = 30 }) {
@@ -479,7 +495,7 @@ async function novedadesDeSet({ departamento, nidset, desde, hasta, penal = fals
     return { departamento, nidset, desde, hasta, ...r };
 }
 
-async function listarActuaciones({ nidCausa, pidJuzgado, departamento, penal = false, familia = false }) {
+async function listarActuaciones({ nidCausa, pidJuzgado, departamento, penal = false, familia = false, limite = 40, desde = "", incluirHtml = false }) {
     const jur = departamento ? { depto: departamento, penal, familia } : null;
     if (jur) await entrarJurisdiccion(jur);
     const html = await getConSesion(`/procesales.asp?nidCausa=${encodeURIComponent(nidCausa)}&pidJuzgado=${encodeURIComponent(pidJuzgado)}`, jur);
@@ -511,6 +527,22 @@ async function listarActuaciones({ nidCausa, pidJuzgado, departamento, penal = f
             firmado: /firmad/i.test(cuerpoFila),
         });
     });
+    ficha.totalPasos = ficha.pasos.length;
+    if (incluirHtml) {
+        const a0 = $('a[href*="proveido.asp"]').first();
+        const h = $("body").html() || "";
+        const i = h.indexOf("proveido.asp");
+        ficha.htmlMuestra = {
+            cabecera: (i > 0 ? h.slice(Math.max(0, i - 2500), i) : h.slice(0, 2500)).replace(/\s+/g, " "),
+            primerPaso: a0.length ? $.html(a0.closest("tr")).replace(/\s+/g, " ").slice(0, 2000) : "",
+        };
+    }
+    const dDesde = desde ? aFecha(desde) : null;
+    if (dDesde) ficha.pasos = ficha.pasos.filter((p) => { const d = aFecha(p.fecha); return !d || d >= dDesde; });
+    if (limite > 0 && ficha.pasos.length > limite) {
+        ficha.aviso = `Se muestran los ${limite} pasos mas recientes de ${ficha.totalPasos}. Usa limite=0 para verlos todos o desde=d/m/aaaa para acotar por fecha.`;
+        ficha.pasos = ficha.pasos.slice(0, limite);
+    }
     return ficha;
 }
 
@@ -526,7 +558,16 @@ async function obtenerProveido({ nidCausa, pidJuzgado, nPosi, departamento, pena
     ref("firmadoPor", /Firmado por\s*(.+?)\s+(?:Nro|Observaci|Presentado|Texto)/i);
     ref("nroPresentacion", /Presentaci[oó]n Electr[oó]nica\s*(\d+)/i);
     const tx = cuerpo.match(/Texto del Prove[ií]do(.*)$/i);
-    if (tx) out.texto = limpiar(tx[1].replace(/-{3,}[^-]*seleccione desde aqu[ií][^-]*-{3,}/i, "")).slice(0, 12000);
+    if (tx) {
+        // La pagina separa el despacho del firmante con una linea "Para copiar y pegar el
+        // texto seleccione hasta aqui"; despues vienen los links de navegacion.
+        const [cuerpoTexto, cola = ""] = tx[1].split(/-{3,}\s*Para copiar y pegar el texto seleccione (?:desde|hasta) aqu[ií][^-]*-{3,}/i);
+        out.texto = limpiar(cuerpoTexto).slice(0, 12000);
+        // La pagina pega el cargo al nombre sin espacio ("...AlbertoAUXILIAR LETRADO").
+        const firmante = limpiar(cola.replace(/Volver al expediente.*$/i, "")).replace(/([a-záéíóúñ])([A-ZÁÉÍÓÚÑ]{3,})/g, "$1 $2");
+        if (firmante) out.firmante = firmante;
+        else out.texto = limpiar(out.texto.replace(/\s*Volver al expediente.*$/i, ""));
+    }
     return out;
 }
 
@@ -701,6 +742,7 @@ export function registerAllTools(server) {
             nidset: stringOrNumber.describe("nidset del set (lo devuelve listar_sets)."),
             penal: z.boolean().optional().default(false),
             familia: z.boolean().optional().default(false),
+            incluirHtml: z.boolean().optional().default(false).describe("Diagnostico: agrega una muestra del HTML crudo de la primera fila, para depurar el parser. No usar en consultas normales."),
         },
         async (a) => { try { return ok(await causasDeSet(a)); } catch (e) { return fail(e); } }
     );
@@ -721,13 +763,16 @@ export function registerAllTools(server) {
 
     server.tool(
         "listar_actuaciones",
-        "Obtiene la ficha y los pasos procesales (actuaciones) de una causa de la MEV por nidCausa + pidJuzgado. Cada paso trae nPosi, fecha, descripcion y si esta firmado.",
+        "Obtiene la ficha y los pasos procesales (actuaciones) de una causa de la MEV por nidCausa + pidJuzgado. Cada paso trae nPosi, fecha, descripcion y si esta firmado. Por defecto devuelve los 40 pasos mas recientes (totalPasos informa cuantos hay); usar limite=0 para todos o desde=d/m/aaaa para acotar.",
         {
             nidCausa: stringOrNumber.describe("nidCausa de la causa (lo devuelven buscar_causas / causas_de_set)."),
             pidJuzgado: z.string().describe("Codigo del organismo (pidJuzgado), ej. 'GAM2078'."),
             departamento: z.string().optional().describe("Departamento judicial (recomendado, para fijar la jurisdiccion de sesion)."),
             penal: z.boolean().optional().default(false),
             familia: z.boolean().optional().default(false),
+            limite: z.number().int().min(0).optional().default(40).describe("Maximo de pasos a devolver (los mas recientes primero). 0 = todos. Default 40."),
+            desde: z.string().optional().describe("Solo pasos desde esta fecha, formato d/m/aaaa."),
+            incluirHtml: z.boolean().optional().default(false).describe("Diagnostico: agrega una muestra del HTML crudo (cabecera y primer paso) para depurar el parser. No usar en consultas normales."),
         },
         async (a) => { try { return ok(await listarActuaciones(a)); } catch (e) { return fail(e); } }
     );

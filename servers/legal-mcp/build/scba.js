@@ -268,16 +268,23 @@ export function registerAllTools(server) {
 
     server.tool(
         "listar_organismos",
-        "Devuelve la lista de organismos judiciales disponibles en sentencias.scba.gov.ar para el tipo de registro indicado. Llamar antes de buscar_documentos para obtener los nombres y IDs exactos.",
+        "Devuelve la lista de organismos judiciales disponibles en sentencias.scba.gov.ar para el tipo de registro indicado. Llamar antes de buscar_documentos para obtener los nombres y IDs exactos. Sin filtro devuelve cientos de organismos: conviene pasar `filtro` (ej. 'SAN ISIDRO', 'TRABAJO').",
         {
             tipo_registro: z.enum(["sentencias", "resoluciones"])
                 .optional()
                 .default("sentencias")
                 .describe("Tipo de registro. Default: sentencias."),
+            filtro: z.string().optional()
+                .describe("Texto a buscar en el nombre del organismo (sin distinguir mayusculas ni acentos). Ej: 'SAN ISIDRO', 'CIVIL Y COMERCIAL Nº 4'. Se aceptan varias palabras: deben estar todas."),
         },
         async (args) => {
             try {
-                const lista = await listarOrganismos(args.tipo_registro ?? "sentencias");
+                let lista = await listarOrganismos(args.tipo_registro ?? "sentencias");
+                if (args.filtro && args.filtro.trim()) {
+                    const norm = (t) => String(t).normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+                    const palabras = norm(args.filtro).split(/\s+/).filter(Boolean);
+                    lista = lista.filter((o) => palabras.every((p) => norm(o.nombre).includes(p)));
+                }
                 return { content: [{ type: "text", text: JSON.stringify(lista, null, 2) }] };
             } catch (e) {
                 return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };

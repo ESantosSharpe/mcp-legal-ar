@@ -77,16 +77,39 @@ const limpiar = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 function decodeLatin1(res) {
     return Buffer.from(res.data).toString("latin1");
 }
+// URL final de la ultima respuesta (tras seguir redirects). La MEV rechaza un login
+// con un 302 a AvisoERRORUsrINEX.asp, asi que la URL final dice mas que el HTML.
+let _ultimaUrl = "";
+function registrarUrlFinal(res) {
+    _ultimaUrl = res?.request?.res?.responseUrl || res?.request?.responseURL
+        || (res?.request?.path ? `${BASE}${res.request.path}` : "") || "";
+}
 async function get(pathAndQuery) {
     const res = await axiosClient.get(`${BASE}${pathAndQuery}`, { responseType: "arraybuffer" });
+    registrarUrlFinal(res);
     return decodeLatin1(res);
 }
+// Codifica el form como lo hace un navegador con una pagina ISO-8859-1 (la MEV):
+// los caracteres no ASCII (n con tilde, acentos) van como un byte Latin-1, no como
+// UTF-8 de dos bytes. Con URLSearchParams una clave con "n" o acento llegaba distinta.
+function escLatin1(valor) {
+    let out = "";
+    for (const b of Buffer.from(String(valor ?? ""), "latin1")) {
+        const c = String.fromCharCode(b);
+        if (/[A-Za-z0-9\-_.~]/.test(c)) out += c;
+        else if (b === 0x20) out += "+";
+        else out += "%" + b.toString(16).toUpperCase().padStart(2, "0");
+    }
+    return out;
+}
+const formLatin1 = (campos) => Object.entries(campos).map(([k, v]) => `${escLatin1(k)}=${escLatin1(v)}`).join("&");
 async function postForm(path, campos, referer) {
-    const body = new URLSearchParams(campos).toString();
+    const body = formLatin1(campos);
     const res = await axiosClient.post(`${BASE}${path}`, body, {
         responseType: "arraybuffer",
         headers: { "Content-Type": "application/x-www-form-urlencoded", ...(referer ? { Referer: `${BASE}${referer}` } : {}) },
     });
+    registrarUrlFinal(res);
     return decodeLatin1(res);
 }
 
@@ -162,8 +185,33 @@ async function resolverTurnstileConNavegador(pathAndQuery) {
     return html;
 }
 
+// La MEV rechaza un login con 302 -> AvisoERRORUsrINEX.asp?s1=<motivo>. Esa pagina NO
+// trae el formulario de login, asi que esSesionCaida() no la detecta: antes el conector
+// daba el login por bueno y despues fallaba con un enganoso "sesion caida".
+function motivoRechazoLogin(html, url) {
+    if (/AvisoERROR/i.test(String(url || ""))) {
+        const m = String(url).match(/[?&]s1=([^&]+)/i);
+        let msg = "";
+        const crudo = m ? m[1] : "";
+        // La URL puede venir en UTF-8 (%C3%A1) o en Latin-1 (%e1): probar ambas.
+        try { msg = decodeURIComponent(crudo); } catch { try { msg = unescape(crudo); } catch { } }
+        return limpiar(msg) || "Usuario o clave invalida";
+    }
+    if (/AvisoERRORUsrINEX/i.test(html) || /Usuario o clave inv/i.test(html)) return "Usuario o clave invalida";
+    return null;
+}
+// Tras un rechazo NO se reintenta con las mismas credenciales: cada intento fallido
+// suma contra la cuenta y la SCBA puede bloquearla. Se frena por un rato en este proceso.
+const FRENO_LOGIN_MS = Number(process.env.MEV_FRENO_LOGIN_MS || 15 * 60 * 1000);
+let _loginRechazadoHasta = 0;
+let _loginRechazadoMotivo = "";
+
 // Login por POST con credenciales de entorno (modo 1).
 async function loginPorCredenciales() {
+    if (Date.now() < _loginRechazadoHasta) {
+        const min = Math.ceil((_loginRechazadoHasta - Date.now()) / 60000);
+        throw new Error(`Login MEV rechazado por la SCBA ("${_loginRechazadoMotivo}"). No se reintenta durante ${min} min para no bloquear la cuenta. Corregi MEV_USUARIO / MEV_CLAVE / MEV_DEPTO_REGISTRADO, reinicia Claude Desktop y volve a probar.`);
+    }
     cookieJar.clear();
     _logueado = false; _jurisActual = null;
     await get("/loguin.asp"); // siembra cookie de sesion
@@ -173,7 +221,12 @@ async function loginPorCredenciales() {
         DeptoRegistrado: process.env.MEV_DEPTO_REGISTRADO || "aa",
     }, "/loguin.asp");
     if (esClaveVencida(html)) throw new Error("La clave MEV esta vencida o requiere cambio (politica de 90 dias). Renovarla a mano en mev.scba.gov.ar.");
-    if (esSesionCaida(html)) throw new Error("Login MEV rechazado: verificar MEV_USUARIO / MEV_CLAVE / MEV_DEPTO_REGISTRADO.");
+    const rechazo = motivoRechazoLogin(html, _ultimaUrl);
+    if (rechazo || esSesionCaida(html)) {
+        _loginRechazadoMotivo = rechazo || "la MEV volvio a mostrar el formulario de login";
+        _loginRechazadoHasta = Date.now() + FRENO_LOGIN_MS;
+        throw new Error(`Login MEV rechazado por la SCBA: "${_loginRechazadoMotivo}". Verificar MEV_USUARIO / MEV_CLAVE / MEV_DEPTO_REGISTRADO (el depto debe ser el de tu registro; "aa" = todos). No se reintenta durante ${Math.round(FRENO_LOGIN_MS / 60000)} min para no bloquear la cuenta.`);
+    }
     _logueado = true;
     return html;
 }

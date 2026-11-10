@@ -1,0 +1,20 @@
+{
+  "name": "mcp-legal-ar",
+  "version": "2.1.0",
+  "description": "Servidor MCP unificado de herramientas jurídicas argentinas",
+  "main": "build/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node build/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "axios": "^1.17.0",
+    "cheerio": "^1.2.0",
+    "nodemailer": "^9.0.3",
+    "puppeteer": "^25.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

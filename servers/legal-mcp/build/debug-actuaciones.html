@@ -1,0 +1,96 @@
+
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html lang="es">
+
+<head>
+    <title>Validando acceso...</title>
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js"
+            async
+            defer></script>
+</head>
+
+<body>
+<div id="mensajeValidacion"></div>
+<style>
+
+html, body {
+    height: 100%;
+    margin: 0;
+}
+
+body {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background-color: white;
+    font-family: Arial, sans-serif;
+}
+
+#mensajeValidacion {
+    text-align: center;
+    font-size: 22px;
+    line-height: 1.6;
+    white-space: pre-line;
+}
+
+</style>
+
+<script>
+
+const texto =`
+El sistema está verificando si está siendo navegado por un ser humano.
+Si esto demora vuelva a cargar la página`;
+
+document.getElementById("mensajeValidacion").innerHTML = "Validando acceso ..." + texto;
+
+</script>
+<div class="cf-turnstile"
+     data-sitekey="0x4AAAAAADnwgEC6L_Gs921X"
+     data-callback="onTurnstileSuccess"
+     data-size="normal">
+</div>
+<script>
+
+function onTurnstileSuccess(token) {
+
+    fetch("/validar_turnstile.asp", {
+
+        method: "POST",
+
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+
+        body:
+            "token=" + encodeURIComponent(token) +
+            "&url_original=" + encodeURIComponent("/procesales.asp?nidCausa=2106273&pidJuzgado=GAM335")
+
+    })
+    .then(response => {
+        return response.text();
+
+})
+    .then(texto => {
+        if (texto == "OK") {
+
+            window.location.reload();
+
+        }
+        else {
+            const div = document.getElementById("mensajeValidacion");
+            const textoError = "<br><br>La validación de seguridad falló.<br>Por favor recargue la página e inténtelo nuevamente.";
+
+            div.style.color = "#b00020";
+            div.style.fontSize = "20px";
+            div.innerHTML = textoError;
+        }
+
+    });
+
+}
+</script>
+</body>
+</html>
+

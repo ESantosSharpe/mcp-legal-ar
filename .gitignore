@@ -1,0 +1,63 @@
+# Dependencias
+node_modules/
+
+# Builds compilados - excluir la raiz pero trackear los builds de los servidores
+/build/
+!servers/legal-mcp/build/
+!servers/saij-mcp/build/
+
+# Datos locales y caches
+data/
+
+# Logs y diagnostico
+*.log
+diagnose*.js
+diagnose-output.txt
+
+# Variables de entorno
+.env
+.env.*
+
+# Secretos de Cloudflare Workers (wrangler dev) - NUNCA versionar
+.dev.vars
+**/.dev.vars
+*.dev.vars
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Editores
+.vscode/
+.idea/
+
+# Reportes de tests/auditoria - viven en ..\mcp-legal-ar test, NO en el repo
+REPORTE_*.md
+RESUMEN_*.md
+AUDITORIA_*.md
+RETEST_*.md
+
+# Capturas de diagnostico de portales
+_capturas/
+
+# Config personal de Claude Desktop (documentada en el README; no versionar)
+claude_desktop_config.json
+
+# Perfil de navegador de PJN (sesion y cookies personales)
+.pjn-profile/
+
+# Perfil de navegador del MEV HITL (sesion y cookies personales)
+.mev-profile/
+**/.mev-profile/
+
+# Verificador ad-hoc del conector MEV (diagnostico local, no parte del conector)
+test-mev.mjs
+**/test-mev.mjs
+
+# Volcados de debug y pruebas ad-hoc
+csjn_*.txt
+csjn_doc*.txt
+csjn_utf8.txt
+csjn_smoke.txt
+csjn_err.txt
+/test_*.mjs

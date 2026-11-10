@@ -232,9 +232,14 @@ EJE_LOGIN=directo                # directo = CUIT + clave local del EJE | miba =
 PJN_USER=tu_usuario_pjn
 PJN_PASS=tu_clave_pjn
 # PJN_HEADLESS=1                 # no abrir ventana (uso desatendido)
+
+# --- Opcionales ---
+# MCP_LEGAL_OUTPUT_DIRS=D:\\Casos;E:\\Respaldo   # carpetas extra donde se permite guardar archivos (separadas por ;)
+# MEV_TLS_STRICT=1               # MEV: si el certificado no valida, fallar (sin reintento inseguro)
+# JUSCABA_TLS_STRICT=1           # idem para JusCABA
 ```
 
-El `.env` es local y está en `.gitignore`: nunca se sube. El hub lo lee al arrancar. Si preferís el JSON de Claude Desktop, poné los mismos nombres dentro de `"env"`:
+El `.env` es local y está en `.gitignore`. **Ojo al subir el repo a GitHub:** hacelo con `git` (`git add .` respeta el `.gitignore`); el botón "Upload files" de la web **no** lo respeta y sube el `.env` con tus claves. El hub lo lee al arrancar. Si preferís el JSON de Claude Desktop, poné los mismos nombres dentro de `"env"`:
 
 ```json
 "mcp-legal-ar": {

@@ -20,6 +20,14 @@ function envForcesInsecure(prefix) {
     return v === "1" || v === "true";
 }
 
+// <PREFIX>_TLS_STRICT=1 desactiva el reintento sin validacion para ese conector:
+// si el certificado no valida, la consulta falla. Recomendado para los conectores
+// que envian credenciales (MEV, JusCABA). Tiene prioridad sobre <PREFIX>_TLS_INSECURE.
+function envStrict(prefix) {
+    const v = process.env[`${prefix.toUpperCase()}_TLS_STRICT`];
+    return v === "1" || v === "true";
+}
+
 function isTlsVerificationError(error) {
     const code = error?.code ?? "";
     const message = error?.message ?? "";
@@ -41,7 +49,8 @@ function isTlsVerificationError(error) {
  *          en call-sites que lo pasan inline.
  */
 export function installTlsFallback(axiosInstance, prefix) {
-    const forced = envForcesInsecure(prefix);
+    const strict = envStrict(prefix);
+    const forced = envForcesInsecure(prefix) && !strict;
     let warned = false;
 
     // Si la env var lo fuerza, arrancamos inseguros sin intentar estricto.
@@ -57,7 +66,7 @@ export function installTlsFallback(axiosInstance, prefix) {
     axiosInstance.interceptors.response.use(undefined, async (error) => {
         const config = error?.config;
         // Reintento solo: error de cert + no forzado + no reintentado aun.
-        if (!forced && config && !config.__tlsRetried && isTlsVerificationError(error)) {
+        if (!forced && !strict && config && !config.__tlsRetried && isTlsVerificationError(error)) {
             config.__tlsRetried = true;
             config.httpsAgent = insecureAgent;
             if (!warned) {

@@ -26,6 +26,7 @@ const SAIJ_DIR  = path.join(ROOT, "servers", "saij-mcp");
 // etc.). Las variables ya presentes en el entorno (JSON "env") tienen prioridad.
 // El .env esta en .gitignore: nunca se sube al repo.
 // ---------------------------------------------------------------------------
+const _envDesdeArchivo = new Set();
 function cargarEnvFile(p) {
     try {
         if (!fs.existsSync(p)) return;
@@ -34,7 +35,7 @@ function cargarEnvFile(p) {
             if (!m) continue; // ignora comentarios (#...) y lineas vacias
             let v = m[2];
             if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-            if (process.env[m[1]] === undefined) process.env[m[1]] = v;
+            if (process.env[m[1]] === undefined) { process.env[m[1]] = v; _envDesdeArchivo.add(m[1]); }
         }
         process.stderr.write(`[mcp-legal-ar] credenciales cargadas de ${p}\n`);
     } catch (e) {
@@ -43,6 +44,9 @@ function cargarEnvFile(p) {
 }
 cargarEnvFile(process.env.MCP_LEGAL_ENV_FILE || path.join(ROOT, ".env"));
 cargarEnvFile(path.join(LEGAL_MCP, ".env"));
+// Los conectores hijos heredan el entorno y no pueden distinguir de donde vino cada
+// variable. Se les pasa la lista de nombres (nunca valores) que salieron del .env.
+process.env.MCP_LEGAL_ENV_DESDE_ARCHIVO = [..._envDesdeArchivo].join(",");
 // process.execPath puede apuntar a una ruta inexistente en nvm/fnm;
 // buscamos node en PATH como fallback seguro.
 function resolveNode() {

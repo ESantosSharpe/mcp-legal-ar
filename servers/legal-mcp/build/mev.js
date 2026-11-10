@@ -200,6 +200,17 @@ function motivoRechazoLogin(html, url) {
     if (/AvisoERRORUsrINEX/i.test(html) || /Usuario o clave inv/i.test(html)) return "Usuario o clave invalida";
     return null;
 }
+// Ayuda a diagnosticar un rechazo SIN mostrar secretos: de donde salio cada dato (el
+// entorno, p. ej. el bloque "env" de claude_desktop_config.json o una variable de
+// Windows, tiene prioridad sobre el .env) y si exceden el largo que admite el form.
+function origenCredenciales() {
+    const desdeArchivo = (process.env.MCP_LEGAL_ENV_DESDE_ARCHIVO || "").split(",");
+    const de = (k) => (desdeArchivo.includes(k) ? ".env" : "ENTORNO (config de Claude Desktop o variable de Windows; pisa al .env)");
+    const avisos = [];
+    if (String(process.env.MEV_USUARIO || "").length > 10) avisos.push("MEV_USUARIO tiene mas de 10 caracteres (el formulario de la MEV admite 10)");
+    if (String(process.env.MEV_CLAVE || "").length > 20) avisos.push("MEV_CLAVE tiene mas de 20 caracteres (el formulario de la MEV admite 20)");
+    return `Origen de los datos: MEV_USUARIO=${de("MEV_USUARIO")}; MEV_CLAVE=${de("MEV_CLAVE")}; MEV_DEPTO_REGISTRADO=${process.env.MEV_DEPTO_REGISTRADO ? de("MEV_DEPTO_REGISTRADO") : "no definido (usa aa)"}.` + (avisos.length ? ` ATENCION: ${avisos.join("; ")}.` : "");
+}
 // Tras un rechazo NO se reintenta con las mismas credenciales: cada intento fallido
 // suma contra la cuenta y la SCBA puede bloquearla. Se frena por un rato en este proceso.
 const FRENO_LOGIN_MS = Number(process.env.MEV_FRENO_LOGIN_MS || 15 * 60 * 1000);
@@ -225,7 +236,7 @@ async function loginPorCredenciales() {
     if (rechazo || esSesionCaida(html)) {
         _loginRechazadoMotivo = rechazo || "la MEV volvio a mostrar el formulario de login";
         _loginRechazadoHasta = Date.now() + FRENO_LOGIN_MS;
-        throw new Error(`Login MEV rechazado por la SCBA: "${_loginRechazadoMotivo}". Verificar MEV_USUARIO / MEV_CLAVE / MEV_DEPTO_REGISTRADO (el depto debe ser el de tu registro; "aa" = todos). No se reintenta durante ${Math.round(FRENO_LOGIN_MS / 60000)} min para no bloquear la cuenta.`);
+        throw new Error(`Login MEV rechazado por la SCBA: "${_loginRechazadoMotivo}". Verificar MEV_USUARIO / MEV_CLAVE / MEV_DEPTO_REGISTRADO (el depto debe ser el de tu registro; "aa" = todos). No se reintenta durante ${Math.round(FRENO_LOGIN_MS / 60000)} min para no bloquear la cuenta. ${origenCredenciales()}`);
     }
     _logueado = true;
     return html;

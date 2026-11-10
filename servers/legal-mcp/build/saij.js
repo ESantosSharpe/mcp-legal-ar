@@ -266,11 +266,19 @@ server.tool(
   "Resuelve una cita jurídica en texto libre y devuelve el documento o artículo correspondiente.",
   {
     citation_text: z.string().describe("Texto de la cita jurídica (ej: 'Ley 24.240', 'Código Civil')"),
+    limite_caracteres: z.number().optional().describe("Limite maximo de caracteres de la respuesta (default 30000). Si el documento es mas largo se trunca con aviso; para el texto completo usar saij_get_document o saij_get_document_section con el uuid."),
   },
-  async ({ citation_text }) => {
+  async ({ citation_text, limite_caracteres }) => {
     try {
       const result = await searchService.resolveCitation(citation_text);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      // FIX: resolve_citation devolvia el documento COMPLETO (ej. una ley de ~170.000 caracteres).
+      let text = JSON.stringify(result, null, 2);
+      const limite = Math.max(2000, limite_caracteres || LIMITE_CARACTERES_DEFAULT);
+      if (text.length > limite) {
+        const total = text.length;
+        text = text.slice(0, limite) + `\n\n[... RESPUESTA TRUNCADA: se muestran ${limite} de ${total} caracteres. Para el texto completo o un articulo puntual usar saij_get_document / saij_get_document_section con el uuid, o subir limite_caracteres.]`;
+      }
+      return { content: [{ type: "text", text }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
     }
@@ -287,8 +295,20 @@ server.tool(
   },
   async ({ term, limit }) => {
     try {
-      const suggestions = await searchService.suggestTerms(term, limit);
-      return { content: [{ type: "text", text: JSON.stringify(suggestions, null, 2) }] };
+      try {
+        const suggestions = await searchService.suggestTerms(term, limit);
+        return { content: [{ type: "text", text: JSON.stringify(suggestions, null, 2) }] };
+      } catch (errSuggest) {
+        // El endpoint /suggest responde HTTP 500 (cambio de SAIJ, sin resolver). En vez de fallar,
+        // se ofrecen resultados relacionados de una busqueda normal, avisando que no son autocompletado.
+        const rel = await searchService.searchLegislacion({ query: term, pageSize: Math.min(Math.max(limit || 5, 1), 10), offset: 0, view: "colapsada" });
+        const out = {
+          aviso: `El autocompletado de SAIJ no esta disponible (${errSuggest instanceof Error ? errSuggest.message : String(errSuggest)}). Se devuelven resultados de busqueda relacionados con "${term}".`,
+          resultados_relacionados: (rel.results || []).map((r) => ({ uuid: r.uuid, abstract: typeof r.document_abstract === "string" ? r.document_abstract.slice(0, 300) : r.document_abstract })),
+          total_results: rel.total_results,
+        };
+        return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
+      }
     } catch (err) {
       return { content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
     }

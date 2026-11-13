@@ -417,6 +417,111 @@ async function ejecutarBusqueda(page, contexto, botonId) {
     return txt(formatearResultados(res, contexto));
 }
 
+// ---------------------------------------------------------------------------
+// DESCARGA DE DOCUMENTOS DE ACTUACIONES (consulta publica del PJN).
+// El portal antepone a cada actuacion una celda con enlaces "Descargar" / "Ver"
+// (verificado en vivo 12/06/2026). La descarga corre DENTRO del navegador HITL
+// (que ya tiene sesion y captcha resuelto): se hace click real sobre "Descargar"
+// y se recoge el archivo, ya sea como descarga del navegador o como respuesta PDF.
+// ---------------------------------------------------------------------------
+
+/** Marca en el DOM el enlace "Descargar" de la actuacion `orden` (mismo criterio de
+ *  tabla y de filas que scrapeExpediente + extraerActuaciones, para que el indice coincida). */
+async function marcarEnlaceDescarga(page, orden) {
+    return page.evaluate((n) => {
+        const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+        const norm = (s) => clean(s).normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+        document.querySelectorAll("[data-mcp-dl]").forEach((e) => e.removeAttribute("data-mcp-dl"));
+        const cand = [];
+        for (const t of document.querySelectorAll("table")) {
+            const headers = [...t.querySelectorAll("th")].map((th) => clean(th.textContent)).filter(Boolean);
+            if (!headers.length) continue;
+            const headerKey = headers.join("|").toLowerCase();
+            const trs = [...t.querySelectorAll("tbody tr")].filter((tr) => {
+                const f = [...tr.cells].map((c) => clean(c.textContent));
+                return f.some(Boolean) && f.join("|").toLowerCase() !== headerKey && f.join(" ").toLowerCase() !== headerKey.replace(/\|/g, " ");
+            });
+            if (trs.length) cand.push({ trs, hs: headers.map(norm) });
+        }
+        const tabla = cand.find((x) => x.hs.some((h) => h.includes("tipo")) && x.hs.some((h) => h.includes("fecha")))
+            || cand.find((x) => x.hs.some((h) => h.includes("fecha")) && x.hs.length >= 3);
+        if (!tabla) return { ok: false, motivo: "No encontre la tabla de actuaciones en la pagina." };
+        const tr = tabla.trs[n];
+        if (!tr) return { ok: false, motivo: `La tabla tiene ${tabla.trs.length} filas; no existe la ${n}.` };
+        const texto = (e) => clean(e.textContent || e.value || "") + " " + clean(e.getAttribute("title") || e.getAttribute("aria-label") || "");
+        const els = [...tr.querySelectorAll("a, button, input[type=submit], input[type=button], [onclick]")];
+        const el = els.find((e) => /^descargar\b/i.test(texto(e).trim())) || els.find((e) => /descargar/i.test(texto(e)));
+        if (!el) return { ok: false, motivo: "La fila no tiene enlace 'Descargar'.", muestra: tr.innerHTML.replace(/\s+/g, " ").slice(0, 600) };
+        el.setAttribute("data-mcp-dl", "1");
+        try { el.scrollIntoView({ block: "center" }); } catch { /* ignorar */ }
+        return { ok: true, texto: clean(texto(el)), href: el.getAttribute("href") || "", target: el.getAttribute("target") || "" };
+    }, orden);
+}
+
+function nombreDeContentDisposition(cd) {
+    const s = String(cd || "");
+    const m = /filename\*=UTF-8''([^;]+)/i.exec(s) || /filename="?([^";]+)"?/i.exec(s);
+    if (!m) return "";
+    try { return decodeURIComponent(m[1]); } catch { return m[1]; }
+}
+
+/** Click sobre el enlace marcado y espera el archivo. Devuelve {via:"descarga"|"respuesta"|"captcha"|"timeout", ...}. */
+async function descargarConClick(page, dirTmp, { timeoutMs = 60000 } = {}) {
+    let cdp = null;
+    try {
+        cdp = await globalBrowser.target().createCDPSession();
+        await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: dirTmp });
+    } catch {
+        try { cdp = await page.createCDPSession(); await cdp.send("Page.setDownloadBehavior", { behavior: "allow", downloadPath: dirTmp }); } catch { cdp = null; }
+    }
+    let pdf = null;
+    const paginasNuevas = [];
+    const onResp = async (r) => {
+        try {
+            if (pdf) return;
+            const h = r.headers();
+            if (!/application\/(pdf|octet-stream)/i.test(String(h["content-type"] || ""))) return;
+            const b = await r.buffer();
+            if (b && b.length > 100) pdf = { buffer: b, nombre: nombreDeContentDisposition(h["content-disposition"]) };
+        } catch { /* una descarga pura no expone el cuerpo */ }
+    };
+    const onTarget = async (t) => {
+        try { const p = await t.page(); if (p && p !== page) { paginasNuevas.push(p); p.on("response", onResp); } } catch { /* ignorar */ }
+    };
+    page.on("response", onResp);
+    globalBrowser.on("targetcreated", onTarget);
+    try {
+        const h = await page.$('[data-mcp-dl="1"]');
+        if (!h) throw new Error("Se perdio el enlace Descargar antes del click.");
+        await h.click();
+        const limite = Date.now() + timeoutMs;
+        let ultimoTam = -1, estable = 0;
+        while (Date.now() < limite) {
+            await sleep(700);
+            const todos = fs.readdirSync(dirTmp);
+            const parciales = todos.some((f) => /\.crdownload$/i.test(f));
+            const archivos = todos.filter((f) => !/\.(crdownload|tmp)$/i.test(f));
+            if (archivos.length && !parciales) {
+                const ruta = path.join(dirTmp, archivos[0]);
+                const tam = fs.statSync(ruta).size;
+                if (tam > 0 && tam === ultimoTam) { if (++estable >= 2) return { via: "descarga", ruta, nombre: archivos[0] }; }
+                else { estable = 0; ultimoTam = tam; }
+            }
+            if (pdf && !todos.length) { // PDF servido inline: el navegador no lo baja, lo capturamos de la respuesta
+                await sleep(1500);
+                if (!fs.readdirSync(dirTmp).length) return { via: "respuesta", buffer: pdf.buffer, nombre: pdf.nombre };
+            }
+            if (await captchaVisible(page)) return { via: "captcha" };
+        }
+        return { via: "timeout" };
+    } finally {
+        page.off("response", onResp);
+        globalBrowser.off("targetcreated", onTarget);
+        for (const p of paginasNuevas) { try { p.off("response", onResp); if (!p.isClosed()) await p.close(); } catch { /* ignorar */ } }
+        try { await cdp?.detach(); } catch { /* ignorar */ }
+    }
+}
+
 export function registerAllTools(server) {
     // ---- Sesion HITL -------------------------------------------------------
     server.tool("iniciar_hitl_browser", "Abre el navegador interactivo (HITL) en la consulta publica del PJN. REGLA: el usuario tiene que enterarse ANTES de que se abra la ventana, no despues. Avisale en tu respuesta PREVIA: 'Se va a abrir una ventana de Chromium; si muestra un verificador (captcha), resolvelo y avisame'. Recien entonces llama esta tool con aviso_dado=true. La sesion queda viva y las demas tools operan dentro de ella.", {
@@ -840,7 +945,7 @@ ${JURISDICCIONES.join(", ")}
 
 ## Limitaciones conocidas
 - Consulta publica anonima: por parte solo admite tipo DEMANDADO (regla del portal).
-- Sin descarga de PDFs de actuaciones en la consulta publica anonima.
+- Descarga de documentos de actuaciones: pjn_descargar_documento_actuacion (click en el enlace 'Descargar' del portal dentro de la sesion HITL; con el expediente abierto). Implementada a partir de la estructura documentada del portal; verificar en vivo con un expediente real.
 - Reparacion Historica y Gestion Documental: no implementadas en esta version.
 - La conversacion Seam expira: si \`volver_a_resultados\` falla, rehacer la busqueda.
 
@@ -856,7 +961,94 @@ Conector de investigacion sobre el portal publico oficial. No constituye asesora
     stub("relacionar_expedientes", "el portal publico no ofrece expedientes relacionados. Alternativa: pjn_buscar_expediente_por_parte con el nombre de la parte para listar todas sus causas como demandada.");
     stub("pjn_buscar_reparacion_historica", "la solapa existe en el portal pero no fue mapeada aun en esta version del conector.");
     stub("pjn_buscar_gestion_documental", "corresponde a otro sitio (www.pjn.gov.ar/gestion-documental) no cubierto por esta version.");
-    stub("pjn_descargar_documento_actuacion", "no implementada aun en esta version. El portal SI muestra enlaces 'Descargar'/'Ver' por actuacion (verificado 10/6/26); el mapeo de esa descarga queda pendiente para una proxima iteracion.");
+    server.tool("pjn_descargar_documento_actuacion", "Descarga el documento (PDF) de una o varias actuaciones del expediente abierto en la sesion HITL, usando el enlace 'Descargar' del portal. SIN parametros: lista las actuaciones con su numero (#) y si tienen documento (no descarga nada). Con numero=N descarga esa actuacion; con todas=true descarga todas las que tienen documento (hasta 'maximo', default 20). Destino: <carpeta>/<causa>/documentos/NNN-fecha-tipo.pdf (carpeta default: env LEGAL_BOVEDA; solo carpetas permitidas). El numero # es el mismo del indice de exportar_expediente_md. REQUISITOS: sesion HITL con el expediente abierto (expediente.seam). ATENCION: son documentos REALES sin anonimizar; no subir a servicios externos sin anonimizar.", {
+        numero: z.number().int().min(1).optional().describe("Numero (#) de la actuacion a descargar, segun el listado (orden cronologico, igual que exportar_expediente_md)."),
+        todas: z.boolean().optional().describe("true: descargar todas las actuaciones que tienen documento (hasta 'maximo')."),
+        maximo: z.number().int().min(1).max(100).optional().default(20).describe("Tope de documentos por llamada con todas=true. Default 20."),
+        carpeta_destino: z.string().optional().describe("Carpeta base de casos. Default: env LEGAL_BOVEDA o D:\\DERECHO\\Cerebro Digital\\Casos"),
+        alias_causa: z.string().optional().describe("Nombre de la carpeta de la causa (se recomienda un alias opaco). Default: FUERO-NUMERO-ANIO"),
+        sobrescribir: z.boolean().optional().describe("true vuelve a descargar los que ya existen. Default false: se saltean."),
+    }, async (args) => {
+        try {
+            const page = await getPage();
+            if (!urlEs(page, "expediente.seam")) return err(`No hay un expediente abierto (URL actual: ${page.url()}). Abrilo con consultar_expediente / abrir_expediente y reintenta.`);
+            const bloqueo = await bloqueoPorCaptcha(page);
+            if (bloqueo) return bloqueo;
+            const det = await scrapeExpediente(page, { maxFilas: 2000 });
+            const datos = parseDatosExpediente(det);
+            const { actuaciones } = extraerActuaciones(det);
+            if (!actuaciones.length) return err(`No se encontro la tabla de actuaciones en la pagina. Tablas detectadas: ${(det.tablas || []).map((t) => t.headers.join("|")).join(" // ") || "ninguna"}.`);
+            // Misma numeracion que exportar_expediente_md (cronologica ascendente si todas las fechas parsean).
+            const ordenadas = actuaciones.every((a) => a.fechaIso)
+                ? [...actuaciones].sort((a, b) => (a.fechaIso === b.fechaIso ? a.orden - b.orden : (a.fechaIso < b.fechaIso ? -1 : 1)))
+                : [...actuaciones];
+            const lista = ordenadas.map((a, i) => ({ n: i + 1, a }));
+
+            if (args.numero === undefined && !args.todas) {
+                const conDoc = lista.filter((x) => x.a.descargable).length;
+                let out = `# PJN - Actuaciones del expediente (${lista.length}; ${conDoc} con documento descargable)\n\n| # | Fecha | Tipo | Descripcion | Documento |\n|---|---|---|---|---|\n`;
+                for (const { n, a } of lista) out += `| ${n} | ${a.fecha || "-"} | ${a.tipo || "-"} | ${(a.descripcion || "-").slice(0, 90).replace(/\|/g, "/")} | ${a.descargable ? "si" : "-"} |\n`;
+                out += `\nPara descargar: \`numero\` = # de la tabla, o \`todas: true\` (tope \`maximo\`).`;
+                return txt(out);
+            }
+
+            const objetivos = args.todas
+                ? lista.filter((x) => x.a.descargable).slice(0, args.maximo ?? 20)
+                : (lista[args.numero - 1] ? [lista[args.numero - 1]] : []);
+            if (!objetivos.length) return err(args.todas ? "Ninguna actuacion tiene enlace de descarga visible." : `No existe la actuacion #${args.numero} (el expediente tiene ${lista.length}).`);
+
+            const base = resolverRutaSalida((args.carpeta_destino || BOVEDA_DEFAULT).trim());
+            const alias = slugArchivo(args.alias_causa || [datos.fuero || "PJN", datos.numero || "s-n", datos.anio || "s-a"].join("-"), 80);
+            const dirDocs = path.join(base, alias, "documentos");
+            fs.mkdirSync(dirDocs, { recursive: true });
+
+            const resultados = [];
+            let captcha = false;
+            let avisoNavegacion = "";
+            for (const { n, a } of objetivos) {
+                const prefijo = String(n).padStart(3, "0");
+                if (!args.sobrescribir && fs.readdirSync(dirDocs).some((f) => f.startsWith(`${prefijo}-`))) { resultados.push({ n, estado: "ya existia (sobrescribir=true para repetir)" }); continue; }
+                if (!urlEs(page, "expediente.seam")) { resultados.push({ n, estado: `la sesion salio del expediente (URL: ${page.url()}); se corta aca` }); break; }
+                const m = await marcarEnlaceDescarga(page, a.orden);
+                if (!m.ok) { resultados.push({ n, estado: `sin enlace de descarga: ${m.motivo}${m.muestra ? ` | HTML de la fila: ${m.muestra}` : ""}` }); continue; }
+                const tmp = fs.mkdtempSync(path.join(dirDocs, ".tmp-"));
+                try {
+                    const r = await descargarConClick(page, tmp);
+                    if (r.via === "captcha") { captcha = true; resultados.push({ n, estado: "el portal pidio captcha" }); break; }
+                    if (r.via === "timeout") { resultados.push({ n, estado: `timeout: el click sobre "${m.texto}" no produjo ningun archivo (href=${m.href || "-"}, target=${m.target || "-"})` }); continue; }
+                    let cabecera = "";
+                    if (r.via === "respuesta") cabecera = r.buffer.subarray(0, 5).toString("latin1");
+                    else { const fd = fs.openSync(r.ruta, "r"); const b = Buffer.alloc(5); fs.readSync(fd, b, 0, 5, 0); fs.closeSync(fd); cabecera = b.toString("latin1"); }
+                    const ext = cabecera.startsWith("%PDF") ? ".pdf" : (path.extname(r.nombre || "") || ".bin");
+                    const nombreFinal = `${prefijo}-${a.fechaIso || "sin-fecha"}-${slugArchivo(a.tipo || "actuacion", 40)}${ext}`;
+                    const destino = path.join(dirDocs, nombreFinal);
+                    if (r.via === "respuesta") fs.writeFileSync(destino, r.buffer); else fs.renameSync(r.ruta, destino);
+                    resultados.push({ n, estado: "descargado", archivo: nombreFinal, bytes: fs.statSync(destino).size });
+                } finally {
+                    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignorar */ }
+                }
+                // Si el portal sirvio el documento en la MISMA pestana (PDF inline), el navegador quedo
+                // parado en el PDF y abandono el expediente: se vuelve atras para seguir consultando.
+                if (!urlEs(page, "expediente.seam")) {
+                    try { await page.goBack({ waitUntil: "domcontentloaded", timeout: 20000 }); await sleep(1000); } catch { /* ignorar */ }
+                    if (urlEs(page, "expediente.seam")) avisoNavegacion = "El portal abrio algun documento en la misma pestana; se volvio al expediente automaticamente.";
+                    else { avisoNavegacion = `ATENCION: tras la descarga la sesion quedo fuera del expediente (URL: ${page.url()}). Reabri el expediente (volver_a_resultados / abrir_expediente) antes de seguir.`; break; }
+                }
+                if (objetivos.length > 1) await sleep(1500); // no castigar al portal con rafagas
+            }
+
+            const ok = resultados.filter((r) => r.estado === "descargado");
+            let out = `# Descarga de documentos de actuaciones\n\n**Carpeta:** ${dirDocs}\n**Descargados:** ${ok.length} de ${objetivos.length} solicitados\n\n| # | Resultado |\n|---|---|\n`;
+            for (const r of resultados) out += `| ${r.n} | ${r.estado === "descargado" ? `${r.archivo} (${r.bytes < 1024 ? `${r.bytes} B` : `${Math.round(r.bytes / 1024)} KB`})` : r.estado} |\n`;
+            if (captcha) out += `\n${AVISO_CAPTCHA}`;
+            if (avisoNavegacion) out += `\n\n> ${avisoNavegacion}`;
+            out += `\n\n> Son documentos REALES sin anonimizar: no subirlos a servicios externos (NotebookLM incluido) sin anonimizar. Verificar siempre en la fuente oficial.`;
+            return txt(out);
+        }
+        catch (error) {
+            return err(`Error en pjn_descargar_documento_actuacion: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
     stub("pjn_descargar_documento_gestion", "corresponde a Gestion Documental, no cubierto por esta version.");
 }
 
